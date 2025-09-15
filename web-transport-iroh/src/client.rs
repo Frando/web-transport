@@ -112,7 +112,7 @@ impl Client {
     }
 
     pub async fn connect_node_id(&self, node_id: NodeId) -> Result<Session, ClientError> {
-        let url: Url = format!("iroh-h3://{node_id}").parse().unwrap();
+        let url: Url = format!("iroh://{node_id}").parse().unwrap();
         // Connect to the server using the addr we just resolved.
         let opts = ConnectOptions::new().with_transport_config(self.config.clone());
         let conn = self

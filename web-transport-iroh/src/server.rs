@@ -1,6 +1,6 @@
 use std::{net::SocketAddr, sync::Arc};
 
-use crate::{CongestionControl, Connect, ServerError, Session, Settings};
+use crate::{CongestionControl, ServerError, Session};
 
 use futures::{future::BoxFuture, stream::FuturesUnordered, StreamExt};
 use iroh::NodeId;
@@ -119,41 +119,33 @@ impl Server {
 /// A mostly complete WebTransport handshake, just awaiting the server's decision on whether to accept or reject the session based on the URL.
 pub struct Request {
     conn: iroh::endpoint::Connection,
-    settings: Settings,
-    connect: Connect,
+    url: Url,
 }
 
 impl Request {
     /// Accept a new WebTransport session from a client.
     pub async fn accept(conn: iroh::endpoint::Connection) -> Result<Self, ServerError> {
-        // Perform the H3 handshake by sending/reciving SETTINGS frames.
-        let settings = Settings::connect(&conn).await?;
-
-        // Accept the CONNECT request but don't send a response yet.
-        let connect = Connect::accept(&conn).await?;
-
+        let url: Url = format!("iroh://{}", conn.remote_node_id().unwrap())
+            .parse()
+            .unwrap();
         // Return the resulting request with a reference to the settings/connect streams.
-        Ok(Self {
-            conn,
-            settings,
-            connect,
-        })
+        Ok(Self { url, conn })
     }
 
     /// Returns the URL provided by the client.
     pub fn url(&self) -> &Url {
-        self.connect.url()
+        &self.url
     }
 
     /// Accept the session, returning a 200 OK.
-    pub async fn ok(mut self) -> Result<Session, quinn::WriteError> {
-        self.connect.respond(http::StatusCode::OK).await?;
-        Ok(Session::new(self.conn, self.settings, self.connect))
+    pub async fn ok(self) -> Result<Session, quinn::WriteError> {
+        Ok(Session::raw(self.conn, self.url))
     }
 
     /// Reject the session, returing your favorite HTTP status code.
-    pub async fn close(mut self, status: http::StatusCode) -> Result<(), quinn::WriteError> {
-        self.connect.respond(status).await?;
+    pub async fn close(self, status: http::StatusCode) -> Result<(), quinn::WriteError> {
+        self.conn
+            .close(status.as_u16().into(), status.as_str().as_bytes());
         Ok(())
     }
 }

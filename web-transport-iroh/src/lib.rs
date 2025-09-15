@@ -38,13 +38,6 @@ pub use send::*;
 pub use server::*;
 pub use session::*;
 
-// Internal
-mod connect;
-mod settings;
-
-use connect::*;
-use settings::*;
-
 /// The HTTP/3 ALPN is required when negotiating a QUIC connection.
 pub const ALPN: &str = "h3";
 

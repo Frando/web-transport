@@ -2,9 +2,6 @@ use std::sync::Arc;
 
 use thiserror::Error;
 
-use crate::{ConnectError, SettingsError};
-use quinn::rustls;
-
 /// An error returned when connecting to a WebTransport endpoint.
 #[derive(Error, Debug, Clone)]
 pub enum ClientError {
@@ -23,20 +20,11 @@ pub enum ClientError {
     #[error("failed to read: {0}")]
     ReadError(#[from] quinn::ReadError),
 
-    #[error("failed to exchange h3 settings: {0}")]
-    SettingsError(#[from] SettingsError),
-
-    #[error("failed to exchange h3 connect: {0}")]
-    HttpError(#[from] ConnectError),
-
     #[error("quic error: {0}")]
     QuinnError(#[from] quinn::ConnectError),
 
     #[error("invalid DNS name: {0}")]
     InvalidDnsName(String),
-
-    #[error("rustls error: {0}")]
-    Rustls(#[from] rustls::Error),
 
     #[error("endpoint bind error: {0}")]
     Bind(Arc<iroh::endpoint::BindError>),
@@ -203,17 +191,8 @@ pub enum ServerError {
     #[error("failed to read")]
     ReadError(#[from] quinn::ReadError),
 
-    #[error("failed to exchange h3 settings")]
-    SettingsError(#[from] SettingsError),
-
-    #[error("failed to exchange h3 connect")]
-    ConnectError(#[from] ConnectError),
-
     #[error("io error: {0}")]
     IoError(Arc<std::io::Error>),
-
-    #[error("rustls error: {0}")]
-    Rustls(#[from] rustls::Error),
 
     #[error("endpoint bind error: {0}")]
     Bind(Arc<iroh::endpoint::BindError>),

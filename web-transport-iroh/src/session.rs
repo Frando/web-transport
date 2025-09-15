@@ -10,12 +10,9 @@ use std::{
 
 use bytes::{Bytes, BytesMut};
 use futures::stream::{FuturesUnordered, Stream, StreamExt};
-use tokio::io::AsyncReadExt;
 use url::Url;
 
-use crate::{
-    ClientError, Connect, RecvStream, SendStream, SessionError, Settings, WebTransportError,
-};
+use crate::{RecvStream, SendStream, SessionError, WebTransportError};
 
 use web_transport_proto::{Frame, StreamUni, VarInt};
 
@@ -43,108 +40,11 @@ pub struct Session {
     header_bi: Vec<u8>,
     header_datagram: Vec<u8>,
 
-    // Keep a reference to the settings and connect stream to avoid closing them until dropped.
-    #[allow(dead_code)]
-    settings: Option<Arc<Settings>>,
-
     // The URL used to create the session.
     url: Url,
 }
 
 impl Session {
-    pub(crate) fn new(conn: iroh::endpoint::Connection, settings: Settings, connect: Connect) -> Self {
-        // The session ID is the stream ID of the CONNECT request.
-        let session_id = connect.session_id();
-
-        // Cache the tiny header we write in front of each stream we open.
-        let mut header_uni = Vec::new();
-        StreamUni::WEBTRANSPORT.encode(&mut header_uni);
-        session_id.encode(&mut header_uni);
-
-        let mut header_bi = Vec::new();
-        Frame::WEBTRANSPORT.encode(&mut header_bi);
-        session_id.encode(&mut header_bi);
-
-        let mut header_datagram = Vec::new();
-        session_id.encode(&mut header_datagram);
-
-        // Accept logic is stateful, so use an Arc<Mutex> to share it.
-        let accept = SessionAccept::new(conn.clone(), session_id);
-
-        let this = Self {
-            conn,
-            accept: Some(Arc::new(Mutex::new(accept))),
-            session_id: Some(session_id),
-            header_uni,
-            header_bi,
-            header_datagram,
-            url: connect.url().clone(),
-            settings: Some(Arc::new(settings)),
-        };
-
-        // Run a background task to check if the connect stream is closed.
-        let mut this2 = this.clone();
-        tokio::spawn(async move {
-            let (code, reason) = this2.run_closed(connect).await;
-            this2.close(code, reason.as_bytes());
-        });
-
-        this
-    }
-
-    // Keep reading from the control stream until it's closed.
-    async fn run_closed(&mut self, connect: Connect) -> (u32, String) {
-        let (_send, mut recv) = connect.into_inner();
-
-        let mut buf = Vec::new();
-
-        loop {
-            // Keep reading from the stream until we get a closed capsule.
-            match recv.read_buf(&mut buf).await {
-                Ok(0) => return (0, "".to_string()),
-                Ok(_) => {}
-                // std::io::Error is pretty useless
-                Err(_err) => return (1, "read error".to_string()),
-            };
-
-            let mut cursor = Cursor::new(&buf);
-
-            match web_transport_proto::Capsule::decode(&mut cursor) {
-                Ok(capsule) => match capsule {
-                    web_transport_proto::Capsule::CloseWebTransportSession { code, reason } => {
-                        return (code, reason)
-                    }
-                    web_transport_proto::Capsule::Unknown { typ, payload } => {
-                        log::warn!("unknown capsule: type={typ} size={}", payload.len());
-                    }
-                },
-                Err(web_transport_proto::CapsuleError::UnexpectedEnd) => continue, // More data needed.
-                Err(err) => {
-                    log::warn!("control stream capsule error: {err:?}");
-                    return (1, "capsule error".to_string());
-                }
-            };
-
-            buf.drain(..cursor.position() as usize);
-        }
-    }
-
-    /// Connect using an established QUIC connection if you want to create the connection yourself.
-    /// This will only work with a brand new QUIC connection using the HTTP/3 ALPN.
-    pub async fn connect(conn: iroh::endpoint::Connection, url: Url) -> Result<Session, ClientError> {
-        // Perform the H3 handshake by sending/reciving SETTINGS frames.
-        let settings = Settings::connect(&conn).await?;
-
-        // Send the HTTP/3 CONNECT request.
-        let connect = Connect::open(&conn, url).await?;
-
-        // Return the resulting session with a reference to the control/connect streams.
-        // If either stream is closed, then the session will be closed, so we need to keep them around.
-        let session = Session::new(conn, settings, connect);
-
-        Ok(session)
-    }
-
     /// Accept a new unidirectional stream. See [`iroh::endpoint::Connection::accept_uni`].
     pub async fn accept_uni(&self) -> Result<RecvStream, SessionError> {
         if let Some(accept) = &self.accept {
@@ -302,7 +202,6 @@ impl Session {
             header_bi: Default::default(),
             header_datagram: Default::default(),
             accept: None,
-            settings: None,
             url,
         }
     }
@@ -335,7 +234,8 @@ impl PartialEq for Session {
 impl Eq for Session {}
 
 // Type aliases just so clippy doesn't complain about the complexity.
-type AcceptUni = dyn Stream<Item = Result<quinn::RecvStream, iroh::endpoint::ConnectionError>> + Send;
+type AcceptUni =
+    dyn Stream<Item = Result<quinn::RecvStream, iroh::endpoint::ConnectionError>> + Send;
 type AcceptBi = dyn Stream<Item = Result<(quinn::SendStream, quinn::RecvStream), iroh::endpoint::ConnectionError>>
     + Send;
 type PendingUni = dyn Future<Output = Result<(StreamUni, quinn::RecvStream), SessionError>> + Send;
@@ -360,30 +260,6 @@ pub struct SessionAccept {
 }
 
 impl SessionAccept {
-    pub(crate) fn new(conn: iroh::endpoint::Connection, session_id: VarInt) -> Self {
-        // Create a stream that just outputs new streams, so it's easy to call from poll.
-        let accept_uni = Box::pin(futures::stream::unfold(conn.clone(), |conn| async {
-            Some((conn.accept_uni().await, conn))
-        }));
-
-        let accept_bi = Box::pin(futures::stream::unfold(conn, |conn| async {
-            Some((conn.accept_bi().await, conn))
-        }));
-
-        Self {
-            session_id,
-
-            qpack_decoder: None,
-            qpack_encoder: None,
-
-            accept_uni,
-            accept_bi,
-
-            pending_uni: FuturesUnordered::new(),
-            pending_bi: FuturesUnordered::new(),
-        }
-    }
-
     // This is poll-based because we accept and decode streams in parallel.
     // In async land I would use tokio::JoinSet, but that requires a runtime.
     // It's better to use FuturesUnordered instead because it's agnostic.
